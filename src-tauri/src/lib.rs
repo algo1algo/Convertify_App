@@ -1,4 +1,5 @@
 mod convert;
+mod logger;
 mod presets;
 mod probe;
 
@@ -6,6 +7,7 @@ use convert::{
     check_ffmpeg, generate_output_path, start_conversion, AdvancedOptions, ConvertOptions,
     ConvertResult, StreamSelection,
 };
+use logger::{ConversionLog, LogStore};
 use presets::{get_all_presets, Preset};
 use probe::{check_ffprobe, probe_file, MediaInfo};
 
@@ -61,10 +63,11 @@ pub fn get_sidecar_path(app: &tauri::AppHandle, name: &str) -> Option<std::path:
     None
 }
 
-/// Shared state for cancellation
+/// Shared state for cancellation and logging
 pub struct AppState {
     cancel_flag: Arc<AtomicBool>,
     converting: Arc<Mutex<bool>>,
+    log_store: Arc<LogStore>,
 }
 
 impl Default for AppState {
@@ -72,6 +75,7 @@ impl Default for AppState {
         Self {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             converting: Arc::new(Mutex::new(false)),
+            log_store: Arc::new(LogStore::default()),
         }
     }
 }
@@ -141,13 +145,14 @@ async fn start_convert(
     };
     
     let cancel_flag = state.cancel_flag.clone();
+    let log_store = state.log_store.clone();
     
     // Get sidecar paths
     let ffmpeg_path = get_sidecar_path(&app_handle, "ffmpeg");
     let ffprobe_path = get_sidecar_path(&app_handle, "ffprobe");
     
-    // Run conversion
-    let result = start_conversion(app_handle, options, cancel_flag, ffmpeg_path, ffprobe_path).await;
+    // Run conversion with logging
+    let result = start_conversion(app_handle, options, cancel_flag, ffmpeg_path, ffprobe_path, log_store).await;
     
     // Mark as not converting
     *converting = false;
@@ -168,6 +173,30 @@ async fn is_converting(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(*state.converting.lock().await)
 }
 
+/// Get all conversion logs
+#[tauri::command]
+fn get_conversion_logs(state: State<'_, AppState>) -> Vec<ConversionLog> {
+    state.log_store.get_logs()
+}
+
+/// Get the last conversion log
+#[tauri::command]
+fn get_last_conversion_log(state: State<'_, AppState>) -> Option<ConversionLog> {
+    state.log_store.get_last_log()
+}
+
+/// Clear all conversion logs
+#[tauri::command]
+fn clear_conversion_logs(state: State<'_, AppState>) {
+    state.log_store.clear_logs();
+}
+
+/// Export logs as text
+#[tauri::command]
+fn export_conversion_logs(state: State<'_, AppState>) -> String {
+    state.log_store.export_logs()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -184,6 +213,10 @@ pub fn run() {
             start_convert,
             cancel_convert,
             is_converting,
+            get_conversion_logs,
+            get_last_conversion_log,
+            clear_conversion_logs,
+            export_conversion_logs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

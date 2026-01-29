@@ -227,34 +227,71 @@ fn get_duration(input_path: &str, ffprobe_path: Option<&std::path::Path>) -> Opt
         .and_then(|info| info.format.duration)
 }
 
-/// Start a conversion with progress reporting
+/// Start a conversion with progress reporting and logging
 pub async fn start_conversion(
     app_handle: AppHandle,
     options: ConvertOptions,
     cancel_flag: Arc<AtomicBool>,
     ffmpeg_path: Option<std::path::PathBuf>,
     ffprobe_path: Option<std::path::PathBuf>,
+    log_store: Arc<crate::logger::LogStore>,
 ) -> Result<ConvertResult, ConvertError> {
+    use crate::logger::{ConversionLog, LogLevel as AppLogLevel};
+    
+    // Build ffmpeg arguments first to include in log
+    let args = build_ffmpeg_args(&options)?;
+    let ffmpeg_command = format!("ffmpeg {}", args.join(" "));
+    
+    // Create advanced options string for logging
+    let advanced_str = options.advanced.as_ref().map(|a| {
+        format!(
+            "format={:?}, video_codec={:?}, audio_codec={:?}, extra_args={:?}",
+            a.format, a.video_codec, a.audio_codec, a.extra_args
+        )
+    });
+    
+    // Create conversion log
+    let mut conv_log = ConversionLog::new(
+        &options.input_path,
+        &options.output_path,
+        options.preset_id.as_deref(),
+        advanced_str,
+        &ffmpeg_command,
+    );
+    
+    conv_log.add_entry(AppLogLevel::Info, "Starting conversion", None);
+    
     // Validate input file exists
     if !std::path::Path::new(&options.input_path).exists() {
+        conv_log.add_entry(AppLogLevel::Error, "Input file not found", Some(&options.input_path));
+        conv_log.finish(false, Some("Input file not found".to_string()));
+        log_store.add_log(conv_log);
         return Err(ConvertError::InputNotFound(options.input_path.clone()));
     }
     
     // Validate output directory exists
     if let Some(parent) = std::path::Path::new(&options.output_path).parent() {
         if !parent.exists() {
-            return Err(ConvertError::InvalidOutputPath(format!(
-                "Output directory does not exist: {}",
-                parent.display()
-            )));
+            let err_msg = format!("Output directory does not exist: {}", parent.display());
+            conv_log.add_entry(AppLogLevel::Error, &err_msg, None);
+            conv_log.finish(false, Some(err_msg.clone()));
+            log_store.add_log(conv_log);
+            return Err(ConvertError::InvalidOutputPath(err_msg));
         }
+    }
+    
+    // Log FFmpeg path
+    if let Some(ref path) = ffmpeg_path {
+        conv_log.add_entry(AppLogLevel::Debug, "Using bundled FFmpeg", Some(&path.display().to_string()));
+    } else {
+        conv_log.add_entry(AppLogLevel::Debug, "Using system FFmpeg", None);
     }
     
     // Get input duration for progress calculation
     let duration = get_duration(&options.input_path, ffprobe_path.as_deref());
-    
-    // Build ffmpeg arguments
-    let args = build_ffmpeg_args(&options)?;
+    if let Some(dur) = duration {
+        conv_log.add_entry(AppLogLevel::Info, &format!("Input duration: {:.2}s", dur), None);
+    }
     
     let start_time = std::time::Instant::now();
     
@@ -273,22 +310,37 @@ pub async fn start_conversion(
         cmd.arg(arg);
     }
     
+    conv_log.add_entry(AppLogLevel::Info, "Spawning FFmpeg process", None);
+    
     // Spawn the process
     let mut child = cmd.spawn().map_err(|e| {
-        ConvertError::ConversionFailed(format!("Failed to spawn ffmpeg: {}", e))
+        let err_msg = format!("Failed to spawn ffmpeg: {}", e);
+        conv_log.add_entry(AppLogLevel::Error, &err_msg, None);
+        conv_log.finish(false, Some(err_msg.clone()));
+        log_store.add_log(conv_log.clone());
+        ConvertError::ConversionFailed(err_msg)
     })?;
     
     // Iterate over events
     let iter = child.iter().map_err(|e| {
-        ConvertError::ConversionFailed(format!("Failed to get iterator: {}", e))
+        let err_msg = format!("Failed to get iterator: {}", e);
+        conv_log.add_entry(AppLogLevel::Error, &err_msg, None);
+        conv_log.finish(false, Some(err_msg.clone()));
+        log_store.add_log(conv_log.clone());
+        ConvertError::ConversionFailed(err_msg)
     })?;
     
     let mut last_error: Option<String> = None;
+    let mut warning_count = 0;
+    let mut error_count = 0;
     
     for event in iter {
         // Check cancellation
         if cancel_flag.load(Ordering::Relaxed) {
             child.kill().ok();
+            conv_log.add_entry(AppLogLevel::Warning, "Conversion cancelled by user", None);
+            conv_log.finish(false, Some("Cancelled".to_string()));
+            log_store.add_log(conv_log);
             return Err(ConvertError::Cancelled);
         }
         
@@ -317,11 +369,42 @@ pub async fn start_conversion(
                 let _ = app_handle.emit("convert-progress", &progress_event);
             }
             FfmpegEvent::Log(level, msg) => {
-                if matches!(level, LogLevel::Error | LogLevel::Fatal) {
-                    last_error = Some(msg);
+                match level {
+                    LogLevel::Error | LogLevel::Fatal => {
+                        error_count += 1;
+                        conv_log.add_entry(AppLogLevel::Error, &msg, Some("FFmpeg"));
+                        last_error = Some(msg);
+                    }
+                    LogLevel::Warning => {
+                        warning_count += 1;
+                        conv_log.add_entry(AppLogLevel::Warning, &msg, Some("FFmpeg"));
+                    }
+                    LogLevel::Info => {
+                        conv_log.add_entry(AppLogLevel::Info, &msg, Some("FFmpeg"));
+                    }
+                    _ => {
+                        // Log debug/verbose messages as debug
+                        conv_log.add_entry(AppLogLevel::Debug, &msg, Some("FFmpeg"));
+                    }
                 }
             }
+            FfmpegEvent::ParsedVersion(v) => {
+                conv_log.add_entry(AppLogLevel::Info, &format!("FFmpeg version: {}", v.version), None);
+            }
+            FfmpegEvent::ParsedConfiguration(config) => {
+                conv_log.add_entry(AppLogLevel::Debug, &format!("FFmpeg config: {:?}", config), None);
+            }
+            FfmpegEvent::ParsedInput(input) => {
+                conv_log.add_entry(AppLogLevel::Info, &format!("Input #{}: duration={:?}s", input.index, input.duration), None);
+            }
+            FfmpegEvent::ParsedOutput(output) => {
+                conv_log.add_entry(AppLogLevel::Info, &format!("Output #{}: {}", output.index, output.to), None);
+            }
+            FfmpegEvent::ParsedStreamMapping(mapping) => {
+                conv_log.add_entry(AppLogLevel::Debug, &format!("Stream mapping: {}", mapping), None);
+            }
             FfmpegEvent::Done => {
+                conv_log.add_entry(AppLogLevel::Info, "FFmpeg process completed", None);
                 break;
             }
             _ => {}
@@ -330,12 +413,29 @@ pub async fn start_conversion(
     
     // Wait for process to finish
     let status = child.wait().map_err(|e| {
-        ConvertError::ConversionFailed(format!("Failed to wait for ffmpeg: {}", e))
+        let err_msg = format!("Failed to wait for ffmpeg: {}", e);
+        conv_log.add_entry(AppLogLevel::Error, &err_msg, None);
+        conv_log.finish(false, Some(err_msg.clone()));
+        log_store.add_log(conv_log.clone());
+        ConvertError::ConversionFailed(err_msg)
     })?;
     
     let elapsed = start_time.elapsed().as_secs_f64();
     
+    // Log summary
+    conv_log.add_entry(AppLogLevel::Info, &format!("Conversion took {:.2}s", elapsed), None);
+    if warning_count > 0 {
+        conv_log.add_entry(AppLogLevel::Info, &format!("Total warnings: {}", warning_count), None);
+    }
+    if error_count > 0 {
+        conv_log.add_entry(AppLogLevel::Info, &format!("Total errors: {}", error_count), None);
+    }
+    
     if status.success() {
+        conv_log.add_entry(AppLogLevel::Info, "Conversion successful", None);
+        conv_log.finish(true, None);
+        log_store.add_log(conv_log);
+        
         let result = ConvertResult {
             success: true,
             output_path: options.output_path,
@@ -346,6 +446,10 @@ pub async fn start_conversion(
         Ok(result)
     } else {
         let error_msg = last_error.unwrap_or_else(|| "Unknown error".to_string());
+        conv_log.add_entry(AppLogLevel::Error, &format!("Conversion failed: {}", error_msg), None);
+        conv_log.finish(false, Some(error_msg.clone()));
+        log_store.add_log(conv_log);
+        
         let _ = app_handle.emit("convert-error", &error_msg);
         Err(ConvertError::ConversionFailed(error_msg))
     }

@@ -70,6 +70,27 @@ interface ConvertResult {
   message: string | null;
 }
 
+interface LogEntry {
+  timestamp: string;
+  level: "Info" | "Warning" | "Error" | "Debug";
+  message: string;
+  context: string | null;
+}
+
+interface ConversionLog {
+  id: string;
+  started_at: string;
+  ended_at: string | null;
+  input_path: string;
+  output_path: string;
+  preset_id: string | null;
+  advanced_options: string | null;
+  ffmpeg_command: string;
+  success: boolean;
+  error_message: string | null;
+  entries: LogEntry[];
+}
+
 // FFmpeg format options
 const FORMAT_OPTIONS = [
   { value: "", label: "Select format..." },
@@ -202,6 +223,11 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  
+  // Log viewer state
+  const [showLogs, setShowLogs] = useState(false);
+  const [logs, setLogs] = useState<ConversionLog[]>([]);
+  const [selectedLog, setSelectedLog] = useState<ConversionLog | null>(null);
 
   // Initialize
   useEffect(() => {
@@ -403,6 +429,48 @@ function App() {
       console.error("Failed to cancel:", e);
     }
   }
+  
+  // Fetch conversion logs
+  async function fetchLogs() {
+    try {
+      const fetchedLogs = await invoke<ConversionLog[]>("get_conversion_logs");
+      setLogs(fetchedLogs);
+      if (fetchedLogs.length > 0 && !selectedLog) {
+        setSelectedLog(fetchedLogs[fetchedLogs.length - 1]);
+      }
+    } catch (e) {
+      console.error("Failed to fetch logs:", e);
+    }
+  }
+  
+  // Export logs to clipboard
+  async function exportLogs() {
+    try {
+      const exportedLogs = await invoke<string>("export_conversion_logs");
+      await navigator.clipboard.writeText(exportedLogs);
+      alert("Logs copied to clipboard!");
+    } catch (e) {
+      console.error("Failed to export logs:", e);
+      alert("Failed to export logs: " + String(e));
+    }
+  }
+  
+  // Clear all logs
+  async function clearLogs() {
+    try {
+      await invoke("clear_conversion_logs");
+      setLogs([]);
+      setSelectedLog(null);
+    } catch (e) {
+      console.error("Failed to clear logs:", e);
+    }
+  }
+  
+  // Open log viewer
+  function openLogViewer() {
+    fetchLogs();
+    setShowLogs(true);
+  }
 
   // Drag and drop handlers
   function handleDragOver(e: React.DragEvent) {
@@ -470,6 +538,7 @@ function App() {
 
       <div className="credits">
         <small>algo1algo made this</small>
+        <button className="btn-link" onClick={openLogViewer}>View Logs</button>
       </div>
 
       <section className="section">
@@ -782,6 +851,97 @@ function App() {
           </button>
         )}
       </div>
+
+      {/* Log Viewer Modal */}
+      {showLogs && (
+        <div className="modal-overlay" onClick={() => setShowLogs(false)}>
+          <div className="modal log-viewer" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Conversion Logs</h2>
+              <button className="modal-close" onClick={() => setShowLogs(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div className="log-actions">
+                <button className="btn-secondary" onClick={fetchLogs}>Refresh</button>
+                <button className="btn-secondary" onClick={exportLogs}>Copy to Clipboard</button>
+                <button className="btn-danger" onClick={clearLogs}>Clear All</button>
+              </div>
+              
+              {logs.length === 0 ? (
+                <div className="no-logs">No conversion logs yet.</div>
+              ) : (
+                <div className="log-container">
+                  <div className="log-list">
+                    {logs.map((log) => (
+                      <div 
+                        key={log.id} 
+                        className={`log-item ${selectedLog?.id === log.id ? "selected" : ""} ${log.success ? "success" : "failed"}`}
+                        onClick={() => setSelectedLog(log)}
+                      >
+                        <div className="log-item-header">
+                          <span className={`log-status ${log.success ? "success" : "error"}`}>
+                            {log.success ? "✓" : "✗"}
+                          </span>
+                          <span className="log-time">{log.started_at}</span>
+                        </div>
+                        <div className="log-item-file">
+                          {log.input_path.split("/").pop()}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  
+                  {selectedLog && (
+                    <div className="log-details">
+                      <div className="log-detail-header">
+                        <h3>Conversion Details</h3>
+                        <span className={`log-status-badge ${selectedLog.success ? "success" : "error"}`}>
+                          {selectedLog.success ? "Success" : "Failed"}
+                        </span>
+                      </div>
+                      
+                      <div className="log-detail-info">
+                        <div><strong>Started:</strong> {selectedLog.started_at}</div>
+                        {selectedLog.ended_at && <div><strong>Ended:</strong> {selectedLog.ended_at}</div>}
+                        <div><strong>Input:</strong> <code>{selectedLog.input_path}</code></div>
+                        <div><strong>Output:</strong> <code>{selectedLog.output_path}</code></div>
+                        {selectedLog.preset_id && <div><strong>Preset:</strong> {selectedLog.preset_id}</div>}
+                        {selectedLog.advanced_options && (
+                          <div><strong>Advanced:</strong> <code>{selectedLog.advanced_options}</code></div>
+                        )}
+                        {selectedLog.error_message && (
+                          <div className="log-error-msg">
+                            <strong>Error:</strong> {selectedLog.error_message}
+                          </div>
+                        )}
+                      </div>
+                      
+                      <div className="log-command">
+                        <strong>FFmpeg Command:</strong>
+                        <pre>{selectedLog.ffmpeg_command}</pre>
+                      </div>
+                      
+                      <div className="log-entries">
+                        <strong>Log Entries ({selectedLog.entries.length}):</strong>
+                        <div className="log-entries-list">
+                          {selectedLog.entries.map((entry, idx) => (
+                            <div key={idx} className={`log-entry log-entry-${entry.level.toLowerCase()}`}>
+                              <span className="log-entry-time">{entry.timestamp}</span>
+                              <span className={`log-entry-level ${entry.level.toLowerCase()}`}>{entry.level}</span>
+                              <span className="log-entry-msg">{entry.message}</span>
+                              {entry.context && <span className="log-entry-ctx">({entry.context})</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
