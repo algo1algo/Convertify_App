@@ -28,6 +28,7 @@ pub struct StreamSelection {
     pub include_video: bool,
     pub include_audio: bool,
     pub include_subtitles: bool,
+    pub include_data: bool,
 }
 
 impl Default for StreamSelection {
@@ -36,6 +37,7 @@ impl Default for StreamSelection {
             include_video: true,
             include_audio: true,
             include_subtitles: true,
+            include_data: true,
         }
     }
 }
@@ -117,6 +119,9 @@ fn build_ffmpeg_args(options: &ConvertOptions) -> Result<Vec<String>, ConvertErr
     }
     if !stream_sel.include_subtitles {
         args.push("-sn".to_string());
+    }
+    if !stream_sel.include_data {
+        args.push("-dn".to_string());
     }
     
     // Preset or advanced options
@@ -237,6 +242,16 @@ pub async fn start_conversion(
     log_store: Arc<crate::logger::LogStore>,
 ) -> Result<ConvertResult, ConvertError> {
     use crate::logger::{ConversionLog, LogLevel as AppLogLevel};
+    
+    // If output file already exists, use a unique path (_01, _02, ...)
+    let output_path = ensure_unique_output_path(&options.output_path);
+    let options = ConvertOptions {
+        output_path,
+        input_path: options.input_path,
+        preset_id: options.preset_id,
+        advanced: options.advanced,
+        stream_selection: options.stream_selection,
+    };
     
     // Build ffmpeg arguments first to include in log
     let args = build_ffmpeg_args(&options)?;
@@ -455,8 +470,30 @@ pub async fn start_conversion(
     }
 }
 
+/// If the given output path already exists, return a unique path with _01, _02, ... suffix.
+/// Otherwise return the path unchanged.
+pub fn ensure_unique_output_path(path: &str) -> String {
+    let path_obj = std::path::Path::new(path);
+    if !path_obj.exists() {
+        return path.to_string();
+    }
+    let parent = path_obj.parent().unwrap_or(std::path::Path::new("."));
+    let stem = path_obj.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path_obj
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "mp4".to_string());
+    for n in 1..=9999 {
+        let candidate = parent.join(format!("{}_{:02}.{}", stem, n, extension));
+        if !candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+    path.to_string()
+}
+
 /// Generate output path from input path and preset/format
-/// Uses "_Convertified" postfix and adds number if file exists
+/// Uses "_Convertified" postfix and adds _01, _02 if file exists
 pub fn generate_output_path(input_path: &str, preset_id: Option<&str>, format: Option<&str>) -> String {
     let path = std::path::Path::new(input_path);
     let stem = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -478,19 +515,18 @@ pub fn generate_output_path(input_path: &str, preset_id: Option<&str>, format: O
         return base_output.to_string_lossy().to_string();
     }
     
-    // If exists, add number suffix
-    let mut counter = 2;
-    loop {
-        let output_path = parent.join(format!("{}_Convertified_{}.{}", stem, counter, extension));
+    // If exists, add _01, _02, ...
+    for n in 1..=9999 {
+        let suffix = format!("_{:02}", n);
+        let output_path = parent.join(format!("{}_Convertified{}.{}", stem, suffix, extension));
         if !output_path.exists() {
             return output_path.to_string_lossy().to_string();
         }
-        counter += 1;
-        // Safety limit
-        if counter > 9999 {
-            return output_path.to_string_lossy().to_string();
-        }
     }
+    parent
+        .join(format!("{}_Convertified_99.{}", stem, extension))
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Map format to common extension

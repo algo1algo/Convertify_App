@@ -97,17 +97,17 @@ body {
   font-size: 1rem;
 }
 
-/* Credits */
+/* Credits - background on container so it stays with content when scrolling */
 .credits {
   text-align: center;
   margin-bottom: 24px;
+  padding: 10px 20px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius);
 }
 
 .credits small {
   display: inline-block;
-  padding: 6px 16px;
-  background: var(--bg-tertiary);
-  border-radius: 20px;
   color: var(--text-muted);
   font-size: 0.8rem;
   font-style: italic;
@@ -198,6 +198,26 @@ body {
 .btn-small:hover {
   background: var(--border);
   color: var(--text-primary);
+}
+
+/* Input preview */
+.input-preview {
+  margin-top: 16px;
+}
+
+.input-preview h4 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.preview-player {
+  width: 100%;
+  max-height: 280px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
 }
 
 /* Media details */
@@ -542,6 +562,21 @@ body {
   opacity: 1;
 }
 
+.btn-show-in-folder {
+  margin-left: 8px;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  cursor: pointer;
+}
+
+.btn-show-in-folder:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
 /* Progress */
 .progress-section {
   margin-bottom: 20px;
@@ -719,6 +754,29 @@ body {
 .log-actions .btn-danger {
   padding: 8px 16px;
   font-size: 0.85rem;
+}
+
+.log-file-path {
+  margin-bottom: 12px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.log-file-path-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--primary);
+  text-decoration: underline;
+  cursor: pointer;
+  word-break: break-all;
+  text-align: left;
+}
+
+.log-file-path-link:hover {
+  color: var(--primary-hover);
 }
 
 .no-logs {

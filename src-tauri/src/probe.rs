@@ -23,6 +23,7 @@ pub struct MediaInfo {
     pub has_video: bool,
     pub has_audio: bool,
     pub has_subtitles: bool,
+    pub has_data: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +220,7 @@ pub fn probe_file(path: &str, sidecar_path: Option<&std::path::Path>) -> Result<
     let has_video = streams.iter().any(|s| s.stream_type == StreamType::Video);
     let has_audio = streams.iter().any(|s| s.stream_type == StreamType::Audio);
     let has_subtitles = streams.iter().any(|s| s.stream_type == StreamType::Subtitle);
+    let has_data = streams.iter().any(|s| s.stream_type == StreamType::Data);
     
     // Extract filename from path
     let filename = std::path::Path::new(path)
@@ -234,5 +236,6 @@ pub fn probe_file(path: &str, sidecar_path: Option<&std::path::Path>) -> Result<
         has_video,
         has_audio,
         has_subtitles,
+        has_data,
     })
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use chrono::{DateTime, Local};
 
@@ -69,26 +70,81 @@ impl ConversionLog {
     }
 }
 
-/// Global log storage
+/// Format a single conversion log for file output
+fn format_log_for_file(log: &ConversionLog) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("=== Conversion {} ===\n", log.id));
+    output.push_str(&format!("Started: {}\n", log.started_at));
+    if let Some(ref ended) = log.ended_at {
+        output.push_str(&format!("Ended: {}\n", ended));
+    }
+    output.push_str(&format!("Input: {}\n", log.input_path));
+    output.push_str(&format!("Output: {}\n", log.output_path));
+    if let Some(ref preset) = log.preset_id {
+        output.push_str(&format!("Preset: {}\n", preset));
+    }
+    if let Some(ref advanced) = log.advanced_options {
+        output.push_str(&format!("Advanced: {}\n", advanced));
+    }
+    output.push_str(&format!("Command: {}\n", log.ffmpeg_command));
+    output.push_str(&format!("Success: {}\n", log.success));
+    if let Some(ref error) = log.error_message {
+        output.push_str(&format!("Error: {}\n", error));
+    }
+    output.push_str("\n--- Log Entries ---\n");
+    for entry in &log.entries {
+        let level_str = match entry.level {
+            LogLevel::Info => "INFO",
+            LogLevel::Warning => "WARN",
+            LogLevel::Error => "ERROR",
+            LogLevel::Debug => "DEBUG",
+        };
+        output.push_str(&format!("[{}] [{}] {}", entry.timestamp, level_str, entry.message));
+        if let Some(ref ctx) = entry.context {
+            output.push_str(&format!(" ({})", ctx));
+        }
+        output.push('\n');
+    }
+    output.push_str("\n\n");
+    output
+}
+
+/// Global log storage (in-memory and optional file in system log dir)
 pub struct LogStore {
     logs: Mutex<Vec<ConversionLog>>,
     max_logs: usize,
+    log_dir: Mutex<Option<PathBuf>>,
 }
 
 impl LogStore {
-    pub fn new(max_logs: usize) -> Self {
+    pub fn new(max_logs: usize, log_dir: Option<PathBuf>) -> Self {
         Self {
             logs: Mutex::new(Vec::new()),
             max_logs,
+            log_dir: Mutex::new(log_dir),
         }
     }
 
     pub fn add_log(&self, log: ConversionLog) {
         let mut logs = self.logs.lock().unwrap();
-        logs.push(log);
+        logs.push(log.clone());
         // Keep only the last max_logs entries
         while logs.len() > self.max_logs {
             logs.remove(0);
+        }
+        drop(logs);
+
+        // Append to log file in system folder if configured
+        if let Ok(guard) = self.log_dir.lock() {
+            if let Some(ref dir) = *guard {
+                let path = dir.join("conversion_log.txt");
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                    let _ = std::io::Write::write_all(&mut f, format_log_for_file(&log).as_bytes());
+                }
+            }
         }
     }
 
@@ -146,10 +202,15 @@ impl LogStore {
         
         output
     }
+
+    /// Path to the log file in the system log folder, if file logging is enabled
+    pub fn get_log_file_path(&self) -> Option<PathBuf> {
+        self.log_dir.lock().ok().and_then(|g| g.as_ref().cloned()).map(|d| d.join("conversion_log.txt"))
+    }
 }
 
 impl Default for LogStore {
     fn default() -> Self {
-        Self::new(50) // Keep last 50 conversion logs
+        Self::new(50, None) // Keep last 50 conversion logs, no file logging by default
     }
 }

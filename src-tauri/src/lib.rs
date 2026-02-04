@@ -197,13 +197,32 @@ fn export_conversion_logs(state: State<'_, AppState>) -> String {
     state.log_store.export_logs()
 }
 
+/// Path to the log file in the system folder (if file logging is enabled)
+#[tauri::command]
+fn get_log_file_path(state: State<'_, AppState>) -> Option<String> {
+    state
+        .log_store
+        .get_log_file_path()
+        .and_then(|p| p.to_str().map(String::from))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .manage(AppState::default())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .setup(|app| {
+            let log_dir = app.path().app_log_dir().ok();
+            let state = AppState {
+                cancel_flag: Arc::new(AtomicBool::new(false)),
+                converting: Arc::new(Mutex::new(false)),
+                log_store: Arc::new(LogStore::new(50, log_dir)),
+            };
+            app.manage(state);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_presets,
             check_ffmpeg_installed,
@@ -217,6 +236,7 @@ pub fn run() {
             get_last_conversion_log,
             clear_conversion_logs,
             export_conversion_logs,
+            get_log_file_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

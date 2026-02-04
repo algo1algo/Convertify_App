@@ -1,7 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
 // Types
@@ -40,12 +43,14 @@ interface MediaInfo {
   has_video: boolean;
   has_audio: boolean;
   has_subtitles: boolean;
+  has_data: boolean;
 }
 
 interface StreamSelection {
   include_video: boolean;
   include_audio: boolean;
   include_subtitles: boolean;
+  include_data: boolean;
 }
 
 interface AdvancedOptions {
@@ -208,6 +213,7 @@ function App() {
     include_video: true,
     include_audio: true,
     include_subtitles: true,
+    include_data: true,
   });
   
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -222,12 +228,14 @@ function App() {
   const [progress, setProgress] = useState<ConvertProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [lastOutputPath, setLastOutputPath] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   
   // Log viewer state
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<ConversionLog[]>([]);
   const [selectedLog, setSelectedLog] = useState<ConversionLog | null>(null);
+  const [logFilePath, setLogFilePath] = useState<string | null>(null);
 
   // Initialize
   useEffect(() => {
@@ -243,6 +251,7 @@ function App() {
       setIsConverting(false);
       setProgress(null);
       setSuccessMessage(`Conversion completed in ${event.payload.duration_secs.toFixed(1)}s`);
+      setLastOutputPath(event.payload.output_path);
     });
     
     const unlistenError = listen<string>("convert-error", (event) => {
@@ -334,6 +343,7 @@ function App() {
         include_video: info.has_video,
         include_audio: info.has_audio,
         include_subtitles: info.has_subtitles,
+        include_data: info.has_data,
       });
       
       // Generate default output path
@@ -412,6 +422,7 @@ function App() {
           include_video: streamSelection.include_video,
           include_audio: streamSelection.include_audio,
           include_subtitles: streamSelection.include_subtitles,
+          include_data: streamSelection.include_data,
         },
       });
     } catch (e) {
@@ -443,11 +454,11 @@ function App() {
     }
   }
   
-  // Export logs to clipboard
+  // Export logs to clipboard (using Tauri plugin - navigator.clipboard fails in webview)
   async function exportLogs() {
     try {
       const exportedLogs = await invoke<string>("export_conversion_logs");
-      await navigator.clipboard.writeText(exportedLogs);
+      await writeText(exportedLogs);
       alert("Logs copied to clipboard!");
     } catch (e) {
       console.error("Failed to export logs:", e);
@@ -467,8 +478,14 @@ function App() {
   }
   
   // Open log viewer
-  function openLogViewer() {
+  async function openLogViewer() {
     fetchLogs();
+    try {
+      const path = await invoke<string | null>("get_log_file_path");
+      setLogFilePath(path);
+    } catch {
+      setLogFilePath(null);
+    }
     setShowLogs(true);
   }
 
@@ -566,6 +583,27 @@ function App() {
           )}
         </div>
 
+        {mediaInfo && inputPath && (mediaInfo.has_video || mediaInfo.has_audio) && (
+          <div className="input-preview">
+            <h4>Preview</h4>
+            {mediaInfo.has_video ? (
+              <video
+                className="preview-player"
+                src={convertFileSrc(inputPath)}
+                controls
+                preload="metadata"
+              />
+            ) : mediaInfo.has_audio ? (
+              <audio
+                className="preview-player"
+                src={convertFileSrc(inputPath)}
+                controls
+                preload="metadata"
+              />
+            ) : null}
+          </div>
+        )}
+
         {mediaInfo && (
           <div className="media-details">
             <div className="media-stats">
@@ -650,6 +688,17 @@ function App() {
                       disabled={isConverting}
                     />
                     <span>Subtitles</span>
+                  </label>
+                )}
+                {mediaInfo.has_data && (
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={streamSelection.include_data}
+                      onChange={(e) => setStreamSelection(s => ({ ...s, include_data: e.target.checked }))}
+                      disabled={isConverting}
+                    />
+                    <span>Data</span>
                   </label>
                 )}
               </div>
@@ -794,7 +843,6 @@ function App() {
             onChange={(e) => setOutputPath(e.target.value)}
             placeholder="Output path will be generated automatically..."
             disabled={isConverting}
-            readOnly
           />
           <button onClick={handleSelectOutput} disabled={isConverting || !inputPath}>
             Change
@@ -811,7 +859,22 @@ function App() {
 
       {successMessage && (
         <div className="alert alert-success">
-          {successMessage}
+          <span>{successMessage}</span>
+          {lastOutputPath && (
+            <button
+              type="button"
+              className="btn-show-in-folder"
+              onClick={async () => {
+                try {
+                  await revealItemInDir(lastOutputPath);
+                } catch (e) {
+                  console.error("Failed to reveal in folder:", e);
+                }
+              }}
+            >
+              Show in Folder
+            </button>
+          )}
           <button className="alert-close" onClick={() => setSuccessMessage(null)}>×</button>
         </div>
       )}
@@ -866,7 +929,20 @@ function App() {
                 <button className="btn-secondary" onClick={exportLogs}>Copy to Clipboard</button>
                 <button className="btn-danger" onClick={clearLogs}>Clear All</button>
               </div>
-              
+              {logFilePath && (
+                <div className="log-file-path">
+                  <small>
+                    Logs are also saved to:{" "}
+                    <button
+                      type="button"
+                      className="log-file-path-link"
+                      onClick={() => revealItemInDir(logFilePath)}
+                    >
+                      {logFilePath}
+                    </button>
+                  </small>
+                </div>
+              )}
               {logs.length === 0 ? (
                 <div className="no-logs">No conversion logs yet.</div>
               ) : (
