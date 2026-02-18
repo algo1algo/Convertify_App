@@ -541,8 +541,16 @@ function App() {
   return (
     <main className="app">
       <header className="header">
-        <h1>Convertify</h1>
-        <p className="subtitle">Convert your files anyway you want - no restrictions</p>
+        <div className="header-left">
+          <h1>Convertify</h1>
+          <p className="subtitle">Convert your files anyway you want - no restrictions</p>
+        </div>
+        <div className="header-center">
+          <span className="header-branding">algo1algo made this</span>
+        </div>
+        <div className="header-right">
+          <button className="btn-view-logs" onClick={openLogViewer}>View Logs</button>
+        </div>
       </header>
 
       {ffmpegError && (
@@ -552,11 +560,6 @@ function App() {
           <small>{ffmpegError}</small>
         </div>
       )}
-
-      <div className="credits">
-        <small>algo1algo made this</small>
-        <button className="btn-link" onClick={openLogViewer}>View Logs</button>
-      </div>
 
       <section className="section">
         <h2>1. Select Input File</h2>
@@ -914,6 +917,10 @@ function App() {
           </button>
         )}
       </div>
+
+      <footer className="footer">
+        Made with care by algo1algo
+      </footer>
 
       {/* Log Viewer Modal */}
       {showLogs && (
