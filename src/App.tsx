@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
@@ -45,6 +46,20 @@ interface MediaInfo {
   has_data: boolean;
 }
 
+interface StreamSelection {
+  include_video: boolean;
+  include_audio: boolean;
+  include_subtitles: boolean;
+  include_data: boolean;
+}
+
+interface AdvancedOptions {
+  format: string | null;
+  video_codec: string | null;
+  audio_codec: string | null;
+  extra_args: string | null;
+}
+
 interface ConvertProgress {
   percent: number;
   time_secs: number;
@@ -84,7 +99,6 @@ interface ConversionLog {
 interface QueueItem {
   id: string;
   inputPath: string;
-  inputFilename: string;
   mediaInfo: MediaInfo | null;
   presetId: string;
   outputName: string;
@@ -95,44 +109,195 @@ interface QueueItem {
   progress?: ConvertProgress;
 }
 
+// FFmpeg format options
+const FORMAT_OPTIONS = [
+  { value: "", label: "Select format..." },
+  { value: "mp4", label: "MP4" },
+  { value: "mkv", label: "MKV (Matroska)" },
+  { value: "webm", label: "WebM" },
+  { value: "avi", label: "AVI" },
+  { value: "mov", label: "MOV (QuickTime)" },
+  { value: "flv", label: "FLV (Flash Video)" },
+  { value: "wmv", label: "WMV" },
+  { value: "mpeg", label: "MPEG" },
+  { value: "mpegts", label: "MPEG-TS" },
+  { value: "3gp", label: "3GP" },
+  { value: "ogg", label: "OGG" },
+  { value: "mp3", label: "MP3" },
+  { value: "wav", label: "WAV" },
+  { value: "flac", label: "FLAC" },
+  { value: "aac", label: "AAC" },
+  { value: "m4a", label: "M4A" },
+  { value: "opus", label: "Opus" },
+  { value: "gif", label: "GIF" },
+  { value: "image2", label: "Image sequence" },
+  { value: "rawvideo", label: "Raw video" },
+  { value: "null", label: "Null (discard)" },
+];
+
+// Video codec options
+const VIDEO_CODEC_OPTIONS = [
+  { value: "", label: "Select video codec..." },
+  { value: "copy", label: "Copy (no re-encode)" },
+  { value: "libx264", label: "H.264 (libx264)" },
+  { value: "libx265", label: "H.265/HEVC (libx265)" },
+  { value: "libvpx", label: "VP8 (libvpx)" },
+  { value: "libvpx-vp9", label: "VP9 (libvpx-vp9)" },
+  { value: "libaom-av1", label: "AV1 (libaom)" },
+  { value: "libsvtav1", label: "AV1 (SVT-AV1)" },
+  { value: "mpeg4", label: "MPEG-4" },
+  { value: "mpeg2video", label: "MPEG-2" },
+  { value: "mpeg1video", label: "MPEG-1" },
+  { value: "mjpeg", label: "MJPEG" },
+  { value: "huffyuv", label: "HuffYUV (lossless)" },
+  { value: "ffv1", label: "FFV1 (lossless)" },
+  { value: "prores", label: "ProRes" },
+  { value: "prores_ks", label: "ProRes (Kostya)" },
+  { value: "dnxhd", label: "DNxHD" },
+  { value: "png", label: "PNG" },
+  { value: "libwebp", label: "WebP" },
+  { value: "gif", label: "GIF" },
+  { value: "rawvideo", label: "Raw video" },
+  { value: "none", label: "No video (-vn)" },
+];
+
+// Audio codec options
+const AUDIO_CODEC_OPTIONS = [
+  { value: "", label: "Select audio codec..." },
+  { value: "copy", label: "Copy (no re-encode)" },
+  { value: "aac", label: "AAC" },
+  { value: "libmp3lame", label: "MP3 (LAME)" },
+  { value: "libopus", label: "Opus" },
+  { value: "libvorbis", label: "Vorbis" },
+  { value: "flac", label: "FLAC (lossless)" },
+  { value: "alac", label: "ALAC (Apple lossless)" },
+  { value: "pcm_s16le", label: "PCM 16-bit LE" },
+  { value: "pcm_s24le", label: "PCM 24-bit LE" },
+  { value: "pcm_s32le", label: "PCM 32-bit LE" },
+  { value: "pcm_f32le", label: "PCM 32-bit Float" },
+  { value: "ac3", label: "AC3 (Dolby Digital)" },
+  { value: "eac3", label: "E-AC3 (Dolby Digital Plus)" },
+  { value: "dts", label: "DTS" },
+  { value: "wmav2", label: "WMA v2" },
+  { value: "libfdk_aac", label: "AAC (Fraunhofer FDK)" },
+  { value: "none", label: "No audio (-an)" },
+];
+
+// Common extra argument presets
+const EXTRA_ARGS_OPTIONS = [
+  { value: "", label: "Select preset or leave empty..." },
+  { value: "-crf 18", label: "High quality (CRF 18)" },
+  { value: "-crf 23", label: "Medium quality (CRF 23)" },
+  { value: "-crf 28", label: "Low quality (CRF 28)" },
+  { value: "-preset ultrafast", label: "Ultrafast encoding" },
+  { value: "-preset fast", label: "Fast encoding" },
+  { value: "-preset medium", label: "Medium encoding (default)" },
+  { value: "-preset slow", label: "Slow encoding (better compression)" },
+  { value: "-preset veryslow", label: "Very slow (best compression)" },
+  { value: "-b:v 5M", label: "Video bitrate 5 Mbps" },
+  { value: "-b:v 10M", label: "Video bitrate 10 Mbps" },
+  { value: "-b:v 20M", label: "Video bitrate 20 Mbps" },
+  { value: "-b:a 128k", label: "Audio bitrate 128 kbps" },
+  { value: "-b:a 192k", label: "Audio bitrate 192 kbps" },
+  { value: "-b:a 320k", label: "Audio bitrate 320 kbps" },
+  { value: "-r 24", label: "Frame rate 24 fps" },
+  { value: "-r 30", label: "Frame rate 30 fps" },
+  { value: "-r 60", label: "Frame rate 60 fps" },
+  { value: "-vf scale=1920:1080", label: "Scale to 1080p" },
+  { value: "-vf scale=1280:720", label: "Scale to 720p" },
+  { value: "-vf scale=640:480", label: "Scale to 480p" },
+  { value: "-ss 00:00:00 -t 00:01:00", label: "First 1 minute" },
+  { value: "-af volume=2.0", label: "Double audio volume" },
+  { value: "-af loudnorm", label: "Normalize audio loudness" },
+  { value: "-metadata title=", label: "Clear metadata" },
+];
+
 function App() {
+  // State
   const [ffmpegError, setFfmpegError] = useState<string | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
-  const [defaultPresetId, setDefaultPresetId] = useState<string>("mp4");
-
-  // Queue state
+  const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
+  
+  const [inputPath, setInputPath] = useState<string | null>(null);
+  const [mediaInfo, setMediaInfo] = useState<MediaInfo | null>(null);
+  const [outputPath, setOutputPath] = useState<string>("");
   const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [selectedQueueId, setSelectedQueueId] = useState<string | null>(null);
   const [batchConverting, setBatchConverting] = useState(false);
-  const [batchSummary, setBatchSummary] = useState<string | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
+  
+  const [streamSelection, setStreamSelection] = useState<StreamSelection>({
+    include_video: true,
+    include_audio: true,
+    include_subtitles: true,
+    include_data: true,
+  });
+  
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [advancedOptions, setAdvancedOptions] = useState<AdvancedOptions>({
+    format: null,
+    video_codec: null,
+    audio_codec: null,
+    extra_args: null,
+  });
+  
+  const [isConverting, setIsConverting] = useState(false);
+  const [progress, setProgress] = useState<ConvertProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  // Ref to track currently converting item id for event routing
-  const currentItemIdRef = useRef<string | null>(null);
-
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [lastOutputPath, setLastOutputPath] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  
   // Log viewer state
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<ConversionLog[]>([]);
   const [selectedLog, setSelectedLog] = useState<ConversionLog | null>(null);
   const [logFilePath, setLogFilePath] = useState<string | null>(null);
+  const currentQueueItemRef = useRef<string | null>(null);
+  const batchConvertingRef = useRef(false);
+  const cancelBatchRef = useRef(false);
 
+  // Initialize
   useEffect(() => {
     checkFfmpeg();
     loadPresets();
-
+    
+    // Listen for progress events
     const unlistenProgress = listen<ConvertProgress>("convert-progress", (event) => {
-      const itemId = currentItemIdRef.current;
-      if (itemId) {
-        setQueue(q => q.map(item =>
-          item.id === itemId ? { ...item, progress: event.payload } : item
-        ));
+      setProgress(event.payload);
+      const activeQueueId = currentQueueItemRef.current;
+      if (activeQueueId) {
+        setQueue(prev => prev.map(item => (
+          item.id === activeQueueId
+            ? { ...item, progress: event.payload }
+            : item
+        )));
       }
     });
+    
+    const unlistenDone = listen<ConvertResult>("convert-done", (event) => {
+      if (batchConvertingRef.current) {
+        return;
+      }
+      setIsConverting(false);
+      setProgress(null);
+      setSuccessMessage(`Conversion completed in ${event.payload.duration_secs.toFixed(1)}s`);
+      setLastOutputPath(event.payload.output_path);
+    });
+    
+    const unlistenError = listen<string>("convert-error", (event) => {
+      if (batchConvertingRef.current) {
+        return;
+      }
+      setIsConverting(false);
+      setProgress(null);
+      setError(event.payload);
+    });
 
+    // Listen for Tauri drag-drop events
     const unlistenDragDrop = listen<{ paths: string[] }>("tauri://drag-drop", (event) => {
       setIsDragging(false);
       if (event.payload.paths && event.payload.paths.length > 0) {
-        addFilesToQueue(event.payload.paths);
+        addFilesToQueue(event.payload.paths, true);
       }
     });
 
@@ -143,15 +308,18 @@ function App() {
     const unlistenDragLeave = listen("tauri://drag-leave", () => {
       setIsDragging(false);
     });
-
+    
     return () => {
       unlistenProgress.then(f => f());
+      unlistenDone.then(f => f());
+      unlistenError.then(f => f());
       unlistenDragDrop.then(f => f());
       unlistenDragEnter.then(f => f());
       unlistenDragLeave.then(f => f());
     };
   }, []);
 
+  // Check FFmpeg installation
   async function checkFfmpeg() {
     try {
       await invoke<string>("check_ffmpeg_installed");
@@ -161,39 +329,111 @@ function App() {
     }
   }
 
+  // Load presets
   async function loadPresets() {
     try {
       const presetList = await invoke<Preset[]>("get_presets");
       setPresets(presetList);
       if (presetList.length > 0) {
-        setDefaultPresetId(presetList[0].id);
+        setSelectedPreset(presetList[0].id);
       }
     } catch (e) {
       console.error("Failed to load presets:", e);
     }
   }
 
-  function getPresetExtension(presetId: string): string {
-    const preset = presets.find(p => p.id === presetId);
-    return preset?.extension || "mp4";
+  function getFilename(path: string): string {
+    return path.split("/").pop() || path;
   }
 
-  function extractStem(filepath: string): string {
-    const filename = filepath.split("/").pop() || filepath;
-    const lastDot = filename.lastIndexOf(".");
-    return lastDot > 0 ? filename.substring(0, lastDot) : filename;
+  function getDirectory(path: string): string {
+    const index = path.lastIndexOf("/");
+    return index > 0 ? path.slice(0, index) : path;
   }
 
-  function extractFolder(filepath: string): string {
-    const lastSlash = filepath.lastIndexOf("/");
-    return lastSlash > 0 ? filepath.substring(0, lastSlash) : ".";
+  function getStem(path: string): string {
+    const filename = getFilename(path);
+    const index = filename.lastIndexOf(".");
+    return index > 0 ? filename.slice(0, index) : filename;
   }
 
-  function extractFilename(filepath: string): string {
-    return filepath.split("/").pop() || filepath;
+  function extensionForPreset(presetId: string | null): string {
+    return presets.find(p => p.id === presetId)?.extension || "mp4";
   }
 
-  const handleAddFiles = useCallback(async () => {
+  function buildQueueOutputPath(item: QueueItem): string {
+    return `${item.outputFolder}/${item.outputName}.${extensionForPreset(item.presetId)}`;
+  }
+
+  function setQueueItem(itemId: string, updates: Partial<QueueItem>) {
+    setQueue(prev => prev.map(item => item.id === itemId ? { ...item, ...updates } : item));
+  }
+
+  function syncEditorFromQueueItem(item: QueueItem) {
+    setSelectedQueueId(item.id);
+    setInputPath(item.inputPath);
+    setMediaInfo(item.mediaInfo);
+    setSelectedPreset(item.presetId);
+    setOutputPath(buildQueueOutputPath(item));
+  }
+
+  async function addFilesToQueue(paths: string[], selectFirst = false) {
+    if (paths.length === 0) return;
+    setError(null);
+    setSuccessMessage(null);
+
+    const presetId = selectedPreset || presets[0]?.id || "";
+    const queueItems: QueueItem[] = [];
+
+    for (const path of paths) {
+      let info: MediaInfo | null = null;
+      try {
+        info = await invoke<MediaInfo>("probe_media_file", { path });
+      } catch {
+        info = null;
+      }
+
+      let outPath = path;
+      if (presetId) {
+        try {
+          outPath = await invoke<string>("get_output_path", {
+            inputPath: path,
+            presetId,
+          });
+        } catch {
+          outPath = `${getDirectory(path)}/${getStem(path)}_Convertified.${extensionForPreset(presetId)}`;
+        }
+      }
+
+      queueItems.push({
+        id: crypto.randomUUID(),
+        inputPath: path,
+        mediaInfo: info,
+        presetId,
+        outputName: getStem(outPath),
+        outputFolder: getDirectory(outPath),
+        status: "pending",
+      });
+    }
+
+    setQueue(prev => [...prev, ...queueItems]);
+
+    const shouldSelect = selectFirst || !selectedQueueId;
+    if (shouldSelect && queueItems.length > 0) {
+      syncEditorFromQueueItem(queueItems[0]);
+      if (queueItems[0].mediaInfo) {
+        setStreamSelection({
+          include_video: queueItems[0].mediaInfo.has_video,
+          include_audio: queueItems[0].mediaInfo.has_audio,
+          include_subtitles: queueItems[0].mediaInfo.has_subtitles,
+          include_data: queueItems[0].mediaInfo.has_data,
+        });
+      }
+    }
+  }
+
+  // Handle file selection
+  const handleSelectFile = useCallback(async () => {
     try {
       const selected = await open({
         multiple: true,
@@ -202,146 +442,148 @@ function App() {
           { name: "All Files", extensions: ["*"] }
         ]
       });
-
+      
       if (selected) {
         const paths = Array.isArray(selected) ? selected : [selected];
-        await addFilesToQueue(paths as string[]);
+        await addFilesToQueue(paths as string[], true);
       }
     } catch (e) {
       setError(String(e));
     }
-  }, [defaultPresetId, presets]);
+  }, [selectedPreset, presets, selectedQueueId]);
 
-  async function addFilesToQueue(paths: string[]) {
-    setError(null);
-    setBatchSummary(null);
-
-    const newItems: QueueItem[] = [];
-    for (const path of paths) {
-      let mediaInfo: MediaInfo | null = null;
-      try {
-        mediaInfo = await invoke<MediaInfo>("probe_media_file", { path });
-      } catch {
-        // probe failed, still add to queue with null info
-      }
-
-      const stem = extractStem(path);
-      const folder = extractFolder(path);
-
-      newItems.push({
-        id: crypto.randomUUID(),
-        inputPath: path,
-        inputFilename: extractFilename(path),
-        mediaInfo,
-        presetId: defaultPresetId,
-        outputName: stem + "_Convertified",
-        outputFolder: folder,
-        status: "pending",
+  // Handle preset change
+  async function handlePresetChange(presetId: string) {
+    setSelectedPreset(presetId);
+    if (selectedQueueId) {
+      setQueueItem(selectedQueueId, { presetId });
+    }
+    
+    if (inputPath) {
+      const outPath = await invoke<string>("get_output_path", {
+        inputPath,
+        presetId,
       });
+      setOutputPath(outPath);
+      if (selectedQueueId) {
+        setQueueItem(selectedQueueId, {
+          outputName: getStem(outPath),
+          outputFolder: getDirectory(outPath),
+          status: "pending",
+          error: undefined,
+          outputPath: undefined,
+        });
+      }
     }
-
-    setQueue(q => [...q, ...newItems]);
   }
 
-  function updateQueueItem(id: string, updates: Partial<QueueItem>) {
-    setQueue(q => q.map(item => item.id === id ? { ...item, ...updates } : item));
+  // Update output path when advanced format changes
+  async function updateOutputPathForFormat(format: string | null) {
+    if (inputPath && format) {
+      const outPath = await invoke<string>("get_output_path", {
+        inputPath,
+        presetId: null,
+        format,
+      });
+      setOutputPath(outPath);
+      if (selectedQueueId) {
+        setQueueItem(selectedQueueId, {
+          outputName: getStem(outPath),
+          outputFolder: getDirectory(outPath),
+          status: "pending",
+          error: undefined,
+          outputPath: undefined,
+        });
+      }
+    }
   }
 
-  function removeQueueItem(id: string) {
-    setQueue(q => q.filter(item => item.id !== id));
-  }
-
-  function clearQueue() {
-    setQueue([]);
-    setBatchSummary(null);
-  }
-
-  async function handleChangeOutputFolder(itemId: string) {
-    const item = queue.find(i => i.id === itemId);
-    if (!item) return;
-
-    const selected = await open({
-      directory: true,
-      defaultPath: item.outputFolder,
+  // Handle output path selection
+  async function handleSelectOutput() {
+    const preset = presets.find(p => p.id === selectedPreset);
+    const selected = await save({
+      defaultPath: outputPath,
+      filters: preset ? [{ name: preset.name, extensions: [preset.extension] }] : undefined
     });
-
+    
     if (selected) {
-      updateQueueItem(itemId, { outputFolder: selected as string });
+      const newPath = selected;
+      setOutputPath(newPath);
+      if (selectedQueueId) {
+        setQueueItem(selectedQueueId, {
+          outputName: getStem(newPath),
+          outputFolder: getDirectory(newPath),
+          status: "pending",
+          error: undefined,
+          outputPath: undefined,
+        });
+      }
     }
   }
 
-  async function startBatchConversion() {
-    if (queue.length === 0) return;
-
-    setBatchConverting(true);
-    setBatchSummary(null);
+  // Start conversion
+  async function startConversion() {
+    if (!inputPath || !outputPath) return;
+    
     setError(null);
-
-    // Reset all pending items
-    setQueue(q => q.map(item =>
-      item.status === "pending" || item.status === "error"
-        ? { ...item, status: "pending" as const, error: undefined, progress: undefined, outputPath: undefined }
-        : item
-    ));
-
-    let doneCount = 0;
-    let errorCount = 0;
-    const itemsToProcess = queue.filter(item => item.status === "pending" || item.status === "error");
-
-    for (const item of itemsToProcess) {
-      currentItemIdRef.current = item.id;
-      const ext = getPresetExtension(item.presetId);
-      const fullOutputPath = `${item.outputFolder}/${item.outputName}.${ext}`;
-
-      updateQueueItem(item.id, {
+    setSuccessMessage(null);
+    setIsConverting(true);
+    setProgress({ percent: 0, time_secs: 0, speed: null, bitrate: null, size_kb: null });
+    currentQueueItemRef.current = selectedQueueId;
+    if (selectedQueueId) {
+      setQueueItem(selectedQueueId, {
         status: "converting",
+        error: undefined,
         progress: { percent: 0, time_secs: 0, speed: null, bitrate: null, size_kb: null },
       });
-
-      try {
-        const result = await invoke<ConvertResult>("start_convert", {
-          inputPath: item.inputPath,
-          outputPath: fullOutputPath,
-          presetId: item.presetId,
-          advanced: null,
-          streamSelection: {
-            include_video: true,
-            include_audio: true,
-            include_subtitles: true,
-            include_data: true,
-          },
-        });
-
-        updateQueueItem(item.id, {
+    }
+    
+    try {
+      const result = await invoke<ConvertResult>("start_convert", {
+        inputPath,
+        outputPath,
+        presetId: showAdvanced ? null : selectedPreset,
+        advanced: showAdvanced ? {
+          format: advancedOptions.format || null,
+          video_codec: advancedOptions.video_codec || null,
+          audio_codec: advancedOptions.audio_codec || null,
+          extra_args: advancedOptions.extra_args || null,
+        } : null,
+        streamSelection: {
+          include_video: streamSelection.include_video,
+          include_audio: streamSelection.include_audio,
+          include_subtitles: streamSelection.include_subtitles,
+          include_data: streamSelection.include_data,
+        },
+      });
+      if (selectedQueueId) {
+        setQueueItem(selectedQueueId, {
           status: "done",
           outputPath: result.output_path,
           progress: undefined,
         });
-        doneCount++;
-      } catch (e) {
-        updateQueueItem(item.id, {
+      }
+    } catch (e) {
+      setIsConverting(false);
+      setProgress(null);
+      setError(String(e));
+      if (selectedQueueId) {
+        setQueueItem(selectedQueueId, {
           status: "error",
           error: String(e),
           progress: undefined,
         });
-        errorCount++;
       }
-    }
-
-    currentItemIdRef.current = null;
-    setBatchConverting(false);
-
-    const total = doneCount + errorCount;
-    if (total > 0) {
-      setBatchSummary(
-        errorCount === 0
-          ? `All ${doneCount} conversion${doneCount > 1 ? "s" : ""} completed successfully!`
-          : `${doneCount}/${total} succeeded, ${errorCount} failed.`
-      );
+    } finally {
+      currentQueueItemRef.current = null;
     }
   }
 
+  // Cancel conversion
   async function cancelConversion() {
+    if (batchConvertingRef.current) {
+      cancelBatchRef.current = true;
+    }
     try {
       await invoke("cancel_convert");
     } catch (e) {
@@ -349,7 +591,153 @@ function App() {
     }
   }
 
-  // Log viewer functions
+  async function selectQueueItem(itemId: string) {
+    const item = queue.find(q => q.id === itemId);
+    if (!item) return;
+    syncEditorFromQueueItem(item);
+  }
+
+  function removeQueueItem(itemId: string) {
+    const nextQueue = queue.filter(item => item.id !== itemId);
+    setQueue(nextQueue);
+    if (selectedQueueId === itemId) {
+      if (nextQueue.length > 0) {
+        syncEditorFromQueueItem(nextQueue[0]);
+      } else {
+        setSelectedQueueId(null);
+        setInputPath(null);
+        setMediaInfo(null);
+        setOutputPath("");
+      }
+    }
+  }
+
+  function clearQueue() {
+    setQueue([]);
+    setSelectedQueueId(null);
+    setInputPath(null);
+    setMediaInfo(null);
+    setOutputPath("");
+    setSuccessMessage(null);
+    setLastOutputPath(null);
+  }
+
+  async function changeQueueItemFolder(itemId: string) {
+    const item = queue.find(q => q.id === itemId);
+    if (!item) return;
+    const selected = await open({
+      directory: true,
+      defaultPath: item.outputFolder,
+    });
+    if (!selected || Array.isArray(selected)) return;
+    setQueueItem(itemId, {
+      outputFolder: selected,
+      status: "pending",
+      error: undefined,
+      outputPath: undefined,
+    });
+    if (selectedQueueId === itemId) {
+      setOutputPath(`${selected}/${item.outputName}.${extensionForPreset(item.presetId)}`);
+    }
+  }
+
+  function updateSelectedOutputPath(path: string) {
+    setOutputPath(path);
+    if (!selectedQueueId) return;
+    setQueueItem(selectedQueueId, {
+      outputName: getStem(path),
+      outputFolder: getDirectory(path),
+      status: "pending",
+      error: undefined,
+      outputPath: undefined,
+    });
+  }
+
+  async function startBatchConversion() {
+    const pendingItems = queue.filter(item => item.status === "pending" || item.status === "error");
+    if (pendingItems.length === 0) return;
+
+    setError(null);
+    setSuccessMessage(null);
+    setIsConverting(true);
+    setBatchConverting(true);
+    batchConvertingRef.current = true;
+    cancelBatchRef.current = false;
+
+    let successCount = 0;
+    let failCount = 0;
+    let lastSuccessPath: string | null = null;
+
+    for (const item of pendingItems) {
+      if (cancelBatchRef.current) {
+        break;
+      }
+
+      currentQueueItemRef.current = item.id;
+      setQueueItem(item.id, {
+        status: "converting",
+        error: undefined,
+        progress: { percent: 0, time_secs: 0, speed: null, bitrate: null, size_kb: null },
+      });
+
+      const output = buildQueueOutputPath({
+        ...item,
+        status: item.status,
+      });
+
+      try {
+        const result = await invoke<ConvertResult>("start_convert", {
+          inputPath: item.inputPath,
+          outputPath: output,
+          presetId: showAdvanced ? null : item.presetId,
+          advanced: showAdvanced ? {
+            format: advancedOptions.format || null,
+            video_codec: advancedOptions.video_codec || null,
+            audio_codec: advancedOptions.audio_codec || null,
+            extra_args: advancedOptions.extra_args || null,
+          } : null,
+          streamSelection: {
+            include_video: streamSelection.include_video,
+            include_audio: streamSelection.include_audio,
+            include_subtitles: streamSelection.include_subtitles,
+            include_data: streamSelection.include_data,
+          },
+        });
+        setQueueItem(item.id, {
+          status: "done",
+          outputPath: result.output_path,
+          progress: undefined,
+        });
+        successCount += 1;
+        lastSuccessPath = result.output_path;
+      } catch (e) {
+        setQueueItem(item.id, {
+          status: "error",
+          error: String(e),
+          progress: undefined,
+        });
+        failCount += 1;
+      }
+    }
+
+    currentQueueItemRef.current = null;
+    batchConvertingRef.current = false;
+    setBatchConverting(false);
+    setIsConverting(false);
+    setProgress(null);
+
+    const total = successCount + failCount;
+    if (cancelBatchRef.current) {
+      setSuccessMessage(`Batch conversion canceled. Completed ${successCount}/${pendingItems.length}.`);
+    } else if (total > 0) {
+      setSuccessMessage(`Batch conversion finished: ${successCount}/${total} succeeded.`);
+    }
+    if (lastSuccessPath) {
+      setLastOutputPath(lastSuccessPath);
+    }
+  }
+  
+  // Fetch conversion logs
   async function fetchLogs() {
     try {
       const fetchedLogs = await invoke<ConversionLog[]>("get_conversion_logs");
@@ -361,7 +749,8 @@ function App() {
       console.error("Failed to fetch logs:", e);
     }
   }
-
+  
+  // Export logs to clipboard (using Tauri plugin - navigator.clipboard fails in webview)
   async function exportLogs() {
     try {
       const exportedLogs = await invoke<string>("export_conversion_logs");
@@ -372,7 +761,8 @@ function App() {
       alert("Failed to export logs: " + String(e));
     }
   }
-
+  
+  // Clear all logs
   async function clearLogs() {
     try {
       await invoke("clear_conversion_logs");
@@ -382,7 +772,8 @@ function App() {
       console.error("Failed to clear logs:", e);
     }
   }
-
+  
+  // Open log viewer
   async function openLogViewer() {
     fetchLogs();
     try {
@@ -394,24 +785,54 @@ function App() {
     setShowLogs(true);
   }
 
+  // Drag and drop handlers
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragging(true);
+  }
+
+  function handleDragLeave(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragging(false);
+  }
+
+  async function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragging(false);
+    
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      // Note: In Tauri, we need the actual path which may not be directly available
+      // For now, prompt user to use the file picker
+      setError("Please use the file picker to select files");
+    }
+  }
+
+  // Format duration
+  function formatDuration(seconds: number | null): string {
+    if (seconds === null) return "Unknown";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) {
+      return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+    }
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  }
+
+  // Format file size
   function formatSize(bytes: number | null): string {
-    if (bytes === null) return "?";
+    if (bytes === null) return "Unknown";
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   }
 
-  function formatDuration(seconds: number | null): string {
-    if (seconds === null) return "?";
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return `${m}:${s.toString().padStart(2, "0")}`;
-  }
-
-  const pendingCount = queue.filter(i => i.status === "pending").length;
-  const doneCount = queue.filter(i => i.status === "done").length;
-  const errorQueueCount = queue.filter(i => i.status === "error").length;
+  // Group presets by category
+  const videoPresets = presets.filter(p => p.category === "video");
+  const audioPresets = presets.filter(p => p.category === "audio");
+  const imagePresets = presets.filter(p => p.category === "image");
 
   return (
     <main className="app">
@@ -436,175 +857,418 @@ function App() {
         </div>
       )}
 
-      {/* Section 1: Add Files */}
       <section className="section">
-        <h2>
-          1. Add Files
-          {queue.length > 0 && <span className="queue-badge">{queue.length}</span>}
-        </h2>
-        <div
-          className={`drop-zone ${isDragging ? "dragging" : ""}`}
-          onClick={handleAddFiles}
+        <h2>1. Select Input File {queue.length > 0 ? `(${queue.length} queued)` : ""}</h2>
+        <div 
+          className={`drop-zone ${isDragging ? "dragging" : ""} ${inputPath ? "has-file" : ""}`}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          onClick={handleSelectFile}
         >
-          <span className="drop-icon">📂</span>
-          <span>Click to add files or drag & drop</span>
-          <span className="drop-hint">You can select multiple files at once</span>
+          {inputPath ? (
+            <div className="file-info">
+              <span className="file-icon">📁</span>
+              <span className="file-name">{mediaInfo?.filename || inputPath}</span>
+              <button className="btn-small" onClick={(e) => { e.stopPropagation(); handleSelectFile(); }}>
+                Change
+              </button>
+            </div>
+          ) : (
+            <>
+              <span className="drop-icon">📂</span>
+              <span>Click to add or drag & drop</span>
+            </>
+          )}
+        </div>
+
+        {mediaInfo && inputPath && (mediaInfo.has_video || mediaInfo.has_audio) && (
+          <div className="input-preview">
+            <h4>Preview</h4>
+            {mediaInfo.has_video ? (
+              <video
+                className="preview-player"
+                src={convertFileSrc(inputPath)}
+                controls
+                preload="metadata"
+              />
+            ) : mediaInfo.has_audio ? (
+              <audio
+                className="preview-player"
+                src={convertFileSrc(inputPath)}
+                controls
+                preload="metadata"
+              />
+            ) : null}
+          </div>
+        )}
+
+        {mediaInfo && (
+          <div className="media-details">
+            <div className="media-stats">
+              <div className="stat">
+                <span className="stat-label">Format</span>
+                <span className="stat-value" title={mediaInfo.format.format_name}>
+                  {mediaInfo.format.format_name.split(',')[0].toUpperCase()}
+                </span>
+              </div>
+              <div className="stat">
+                <span className="stat-label">Duration</span>
+                <span className="stat-value">{formatDuration(mediaInfo.format.duration)}</span>
+              </div>
+              <div className="stat">
+                <span className="stat-label">Size</span>
+                <span className="stat-value">{formatSize(mediaInfo.format.size)}</span>
+              </div>
+              {mediaInfo.format.bit_rate && (
+                <div className="stat">
+                  <span className="stat-label">Bitrate</span>
+                  <span className="stat-value">{Math.round(mediaInfo.format.bit_rate / 1000)} kbps</span>
+                </div>
+              )}
+            </div>
+
+            <div className="streams">
+              <h4>Streams</h4>
+              {mediaInfo.streams.map((stream) => (
+                <div key={stream.index} className={`stream stream-${stream.stream_type}`}>
+                  <span className="stream-type">
+                    {stream.stream_type === "video" && "🎬"}
+                    {stream.stream_type === "audio" && "🔊"}
+                    {stream.stream_type === "subtitle" && "💬"}
+                    {stream.stream_type === "data" && "📊"}
+                    {" "}{stream.stream_type}
+                  </span>
+                  <span className="stream-codec">{stream.codec_name || "unknown"}</span>
+                  {stream.width && stream.height && (
+                    <span className="stream-detail">{stream.width}x{stream.height}</span>
+                  )}
+                  {stream.channels && (
+                    <span className="stream-detail">{stream.channels}ch {stream.sample_rate}Hz</span>
+                  )}
+                  {stream.language && (
+                    <span className="stream-detail">[{stream.language}]</span>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="stream-selection">
+              <h4>Include Streams</h4>
+              <div className="toggles">
+                {mediaInfo.has_video && (
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={streamSelection.include_video}
+                      onChange={(e) => setStreamSelection(s => ({ ...s, include_video: e.target.checked }))}
+                      disabled={isConverting}
+                    />
+                    <span>Video</span>
+                  </label>
+                )}
+                {mediaInfo.has_audio && (
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={streamSelection.include_audio}
+                      onChange={(e) => setStreamSelection(s => ({ ...s, include_audio: e.target.checked }))}
+                      disabled={isConverting}
+                    />
+                    <span>Audio</span>
+                  </label>
+                )}
+                {mediaInfo.has_subtitles && (
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={streamSelection.include_subtitles}
+                      onChange={(e) => setStreamSelection(s => ({ ...s, include_subtitles: e.target.checked }))}
+                      disabled={isConverting}
+                    />
+                    <span>Subtitles</span>
+                  </label>
+                )}
+                {mediaInfo.has_data && (
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={streamSelection.include_data}
+                      onChange={(e) => setStreamSelection(s => ({ ...s, include_data: e.target.checked }))}
+                      disabled={isConverting}
+                    />
+                    <span>Data</span>
+                  </label>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="section">
+        <h2>2. Choose Output Format</h2>
+        
+        <div className="mode-toggle">
+          <button 
+            className={`mode-btn ${!showAdvanced ? "active" : ""}`}
+            onClick={() => setShowAdvanced(false)}
+            disabled={isConverting}
+          >
+            Presets
+          </button>
+          <button 
+            className={`mode-btn ${showAdvanced ? "active" : ""}`}
+            onClick={() => setShowAdvanced(true)}
+            disabled={isConverting}
+          >
+            Advanced
+          </button>
+        </div>
+
+        {!showAdvanced ? (
+          <div className="presets">
+            <div className="preset-group">
+              <h4>Video</h4>
+              <div className="preset-buttons">
+                {videoPresets.map(preset => (
+                  <button
+                    key={preset.id}
+                    className={`preset-btn ${selectedPreset === preset.id ? "selected" : ""}`}
+                    onClick={() => handlePresetChange(preset.id)}
+                    disabled={isConverting}
+                  >
+                    {preset.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="preset-group">
+              <h4>Audio</h4>
+              <div className="preset-buttons">
+                {audioPresets.map(preset => (
+                  <button
+                    key={preset.id}
+                    className={`preset-btn ${selectedPreset === preset.id ? "selected" : ""}`}
+                    onClick={() => handlePresetChange(preset.id)}
+                    disabled={isConverting}
+                  >
+                    {preset.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="preset-group">
+              <h4>Image</h4>
+              <div className="preset-buttons">
+                {imagePresets.map(preset => (
+                  <button
+                    key={preset.id}
+                    className={`preset-btn ${selectedPreset === preset.id ? "selected" : ""}`}
+                    onClick={() => handlePresetChange(preset.id)}
+                    disabled={isConverting}
+                  >
+                    {preset.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="advanced-options">
+            <div className="form-group">
+              <label>Output Format</label>
+              <select
+                value={advancedOptions.format || ""}
+                onChange={(e) => {
+                  const format = e.target.value || null;
+                  setAdvancedOptions(o => ({ ...o, format }));
+                  updateOutputPathForFormat(format);
+                }}
+                disabled={isConverting}
+              >
+                {FORMAT_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Video Codec</label>
+              <select
+                value={advancedOptions.video_codec || ""}
+                onChange={(e) => setAdvancedOptions(o => ({ ...o, video_codec: e.target.value || null }))}
+                disabled={isConverting}
+              >
+                {VIDEO_CODEC_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Audio Codec</label>
+              <select
+                value={advancedOptions.audio_codec || ""}
+                onChange={(e) => setAdvancedOptions(o => ({ ...o, audio_codec: e.target.value || null }))}
+                disabled={isConverting}
+              >
+                {AUDIO_CODEC_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Extra Options</label>
+              <select
+                value={advancedOptions.extra_args || ""}
+                onChange={(e) => setAdvancedOptions(o => ({ ...o, extra_args: e.target.value || null }))}
+                disabled={isConverting}
+              >
+                {EXTRA_ARGS_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="section">
+        <h2>3. Output</h2>
+        <p className="output-hint">Output will be saved in the same folder as input file</p>
+        <div className="output-path">
+          <input
+            type="text"
+            value={outputPath}
+            onChange={(e) => updateSelectedOutputPath(e.target.value)}
+            placeholder="Output path will be generated automatically..."
+            disabled={isConverting}
+          />
+          <button onClick={handleSelectOutput} disabled={isConverting || !inputPath}>
+            Change
+          </button>
         </div>
       </section>
 
-      {/* Section 2: Queue */}
-      {queue.length > 0 && (
-        <section className="section">
-          <h2>2. Conversion Queue</h2>
-
+      <section className="section">
+        <h2>4. Queue {queue.length > 0 ? `(${queue.length})` : ""}</h2>
+        {queue.length === 0 ? (
+          <p className="queue-empty">No files in queue yet. Add files above to start.</p>
+        ) : (
           <div className="queue-table">
-            <div className="queue-header-row">
-              <span className="queue-col-status"></span>
-              <span className="queue-col-input">Input</span>
-              <span className="queue-col-format">Format</span>
-              <span className="queue-col-name">Output Name</span>
-              <span className="queue-col-folder">Output Folder</span>
-              <span className="queue-col-actions"></span>
-            </div>
-
-            {queue.map(item => (
-              <div key={item.id} className={`queue-row queue-row-${item.status}`}>
-                <span className="queue-col-status">
-                  {item.status === "pending" && <span className="queue-status-icon pending">&#9679;</span>}
-                  {item.status === "converting" && <span className="queue-status-icon converting">&#9881;</span>}
-                  {item.status === "done" && <span className="queue-status-icon done">&#10003;</span>}
-                  {item.status === "error" && <span className="queue-status-icon error">&#10007;</span>}
-                </span>
-
-                <span className="queue-col-input" title={item.inputPath}>
-                  <span className="queue-filename">{item.inputFilename}</span>
-                  {item.mediaInfo && (
-                    <span className="queue-file-meta">
-                      {formatSize(item.mediaInfo.format.size)} &middot; {formatDuration(item.mediaInfo.format.duration)}
-                    </span>
-                  )}
-                </span>
-
-                <span className="queue-col-format">
+            {queue.map((item) => (
+              <div
+                key={item.id}
+                className={`queue-row ${selectedQueueId === item.id ? "selected" : ""} ${item.status}`}
+                onClick={() => selectQueueItem(item.id)}
+              >
+                <div className="queue-main">
+                  <div className="queue-file" title={item.inputPath}>
+                    {getFilename(item.inputPath)}
+                  </div>
+                  <div className={`queue-status status-${item.status}`}>
+                    {item.status}
+                  </div>
+                </div>
+                <div className="queue-editors">
                   <select
-                    className="queue-select"
                     value={item.presetId}
+                    onClick={(e) => e.stopPropagation()}
                     onChange={(e) => {
-                      updateQueueItem(item.id, { presetId: e.target.value });
+                      const newPresetId = e.target.value;
+                      setQueueItem(item.id, {
+                        presetId: newPresetId,
+                        status: "pending",
+                        error: undefined,
+                        outputPath: undefined,
+                      });
+                      if (selectedQueueId === item.id) {
+                        void handlePresetChange(newPresetId);
+                      }
                     }}
-                    disabled={batchConverting}
+                    disabled={isConverting}
+                    className="queue-select"
                   >
-                    {presets.map(p => (
-                      <option key={p.id} value={p.id}>{p.name} (.{p.extension})</option>
-                    ))}
+                    {videoPresets.length > 0 && (
+                      <optgroup label="Video">
+                        {videoPresets.map((preset) => (
+                          <option key={preset.id} value={preset.id}>{preset.name}</option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {audioPresets.length > 0 && (
+                      <optgroup label="Audio">
+                        {audioPresets.map((preset) => (
+                          <option key={preset.id} value={preset.id}>{preset.name}</option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {imagePresets.length > 0 && (
+                      <optgroup label="Image">
+                        {imagePresets.map((preset) => (
+                          <option key={preset.id} value={preset.id}>{preset.name}</option>
+                        ))}
+                      </optgroup>
+                    )}
                   </select>
-                </span>
-
-                <span className="queue-col-name">
                   <input
-                    className="queue-input"
                     type="text"
                     value={item.outputName}
-                    onChange={(e) => updateQueueItem(item.id, { outputName: e.target.value })}
-                    disabled={batchConverting}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      const name = e.target.value;
+                      setQueueItem(item.id, {
+                        outputName: name,
+                        status: "pending",
+                        error: undefined,
+                        outputPath: undefined,
+                      });
+                      if (selectedQueueId === item.id) {
+                        setOutputPath(`${item.outputFolder}/${name}.${extensionForPreset(item.presetId)}`);
+                      }
+                    }}
+                    className="queue-input"
+                    disabled={isConverting}
                   />
-                  <span className="queue-ext">.{getPresetExtension(item.presetId)}</span>
-                </span>
-
-                <span className="queue-col-folder">
-                  <span className="queue-folder-path" title={item.outputFolder}>
-                    {item.outputFolder.split("/").pop() || item.outputFolder}
-                  </span>
-                  <button
-                    className="btn-small"
-                    onClick={() => handleChangeOutputFolder(item.id)}
-                    disabled={batchConverting}
-                  >
-                    ...
-                  </button>
-                </span>
-
-                <span className="queue-col-actions">
-                  {item.status === "done" && item.outputPath && (
+                  <div className="queue-folder">
+                    <span title={item.outputFolder}>{item.outputFolder}</span>
                     <button
                       className="btn-small"
-                      title="Show in Folder"
-                      onClick={() => revealItemInDir(item.outputPath!)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void changeQueueItemFolder(item.id);
+                      }}
+                      disabled={isConverting}
                     >
-                      📂
+                      Change
                     </button>
-                  )}
+                  </div>
                   <button
-                    className="btn-small btn-remove"
-                    onClick={() => removeQueueItem(item.id)}
-                    disabled={batchConverting}
-                    title="Remove"
+                    className="btn-small queue-remove"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeQueueItem(item.id);
+                    }}
+                    disabled={isConverting}
                   >
-                    ✕
+                    Remove
                   </button>
-                </span>
-
-                {/* Per-item progress bar */}
+                </div>
                 {item.status === "converting" && item.progress && (
-                  <div className="queue-row-progress">
+                  <div className="queue-progress">
                     <div className="queue-progress-bar">
-                      <div
-                        className="queue-progress-fill"
-                        style={{ width: `${item.progress.percent}%` }}
-                      />
+                      <div className="queue-progress-fill" style={{ width: `${item.progress.percent}%` }} />
                     </div>
-                    <span className="queue-progress-text">
-                      {item.progress.percent.toFixed(0)}%
-                      {item.progress.speed && ` \u00b7 ${item.progress.speed}`}
-                    </span>
+                    <span>{item.progress.percent.toFixed(1)}%</span>
                   </div>
                 )}
-
-                {/* Error message */}
                 {item.status === "error" && item.error && (
-                  <div className="queue-row-error">{item.error}</div>
+                  <div className="queue-error">{item.error}</div>
                 )}
               </div>
             ))}
           </div>
-
-          {/* Queue actions */}
-          <div className="queue-actions">
-            <div className="queue-actions-left">
-              <button
-                className="btn-secondary"
-                onClick={clearQueue}
-                disabled={batchConverting}
-              >
-                Clear Queue
-              </button>
-              <span className="queue-summary-text">
-                {pendingCount} pending
-                {doneCount > 0 && ` \u00b7 ${doneCount} done`}
-                {errorQueueCount > 0 && ` \u00b7 ${errorQueueCount} failed`}
-              </span>
-            </div>
-            <div className="queue-actions-right">
-              {!batchConverting ? (
-                <button
-                  className="btn-primary btn-convert-all"
-                  onClick={startBatchConversion}
-                  disabled={pendingCount === 0 && errorQueueCount === 0 || !!ffmpegError}
-                >
-                  Convert All ({pendingCount + errorQueueCount})
-                </button>
-              ) : (
-                <button
-                  className="btn-danger btn-convert-all"
-                  onClick={cancelConversion}
-                >
-                  Cancel
-                </button>
-              )}
-            </div>
-          </div>
-        </section>
-      )}
+        )}
+      </section>
 
       {error && (
         <div className="alert alert-error">
@@ -613,12 +1277,79 @@ function App() {
         </div>
       )}
 
-      {batchSummary && (
-        <div className={`alert ${batchSummary.includes("failed") ? "alert-error" : "alert-success"}`}>
-          <span>{batchSummary}</span>
-          <button className="alert-close" onClick={() => setBatchSummary(null)}>×</button>
+      {successMessage && (
+        <div className="alert alert-success">
+          <span>{successMessage}</span>
+          {lastOutputPath && (
+            <button
+              type="button"
+              className="btn-show-in-folder"
+              onClick={async () => {
+                try {
+                  await revealItemInDir(lastOutputPath);
+                } catch (e) {
+                  console.error("Failed to reveal in folder:", e);
+                }
+              }}
+            >
+              Show in Folder
+            </button>
+          )}
+          <button className="alert-close" onClick={() => setSuccessMessage(null)}>×</button>
         </div>
       )}
+
+      {isConverting && progress && (
+        <div className="progress-section">
+          <div className="progress-bar">
+            <div 
+              className="progress-fill" 
+              style={{ width: `${progress.percent}%` }}
+            />
+          </div>
+          <div className="progress-stats">
+            <span>{progress.percent.toFixed(1)}%</span>
+            {progress.speed && <span>Speed: {progress.speed}</span>}
+            {progress.bitrate && <span>Bitrate: {progress.bitrate}</span>}
+            {progress.size_kb && <span>Size: {formatSize(progress.size_kb * 1024)}</span>}
+          </div>
+        </div>
+      )}
+
+      <div className="actions">
+        {!isConverting ? (
+          <>
+            <button 
+              className="btn-primary btn-large"
+              onClick={startConversion}
+              disabled={!inputPath || !outputPath || !!ffmpegError}
+            >
+              Convert
+            </button>
+            <button
+              className="btn-secondary btn-large queue-action-btn"
+              onClick={startBatchConversion}
+              disabled={queue.length === 0 || !!ffmpegError}
+            >
+              Convert All Queue
+            </button>
+            <button
+              className="btn-secondary btn-large queue-action-btn"
+              onClick={clearQueue}
+              disabled={queue.length === 0}
+            >
+              Clear Queue
+            </button>
+          </>
+        ) : (
+          <button 
+            className="btn-danger btn-large"
+            onClick={cancelConversion}
+          >
+            {batchConverting ? "Cancel Queue" : "Cancel"}
+          </button>
+        )}
+      </div>
 
       <footer className="footer">
         Made with care by algo1algo
@@ -658,14 +1389,14 @@ function App() {
                 <div className="log-container">
                   <div className="log-list">
                     {logs.map((log) => (
-                      <div
-                        key={log.id}
+                      <div 
+                        key={log.id} 
                         className={`log-item ${selectedLog?.id === log.id ? "selected" : ""} ${log.success ? "success" : "failed"}`}
                         onClick={() => setSelectedLog(log)}
                       >
                         <div className="log-item-header">
                           <span className={`log-status ${log.success ? "success" : "error"}`}>
-                            {log.success ? "\u2713" : "\u2717"}
+                            {log.success ? "✓" : "✗"}
                           </span>
                           <span className="log-time">{log.started_at}</span>
                         </div>
@@ -675,7 +1406,7 @@ function App() {
                       </div>
                     ))}
                   </div>
-
+                  
                   {selectedLog && (
                     <div className="log-details">
                       <div className="log-detail-header">
@@ -684,7 +1415,7 @@ function App() {
                           {selectedLog.success ? "Success" : "Failed"}
                         </span>
                       </div>
-
+                      
                       <div className="log-detail-info">
                         <div><strong>Started:</strong> {selectedLog.started_at}</div>
                         {selectedLog.ended_at && <div><strong>Ended:</strong> {selectedLog.ended_at}</div>}
@@ -700,12 +1431,12 @@ function App() {
                           </div>
                         )}
                       </div>
-
+                      
                       <div className="log-command">
                         <strong>FFmpeg Command:</strong>
                         <pre>{selectedLog.ffmpeg_command}</pre>
                       </div>
-
+                      
                       <div className="log-entries">
                         <strong>Log Entries ({selectedLog.entries.length}):</strong>
                         <div className="log-entries-list">
