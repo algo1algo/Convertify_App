@@ -1100,9 +1100,12 @@ body::before {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 8px;
+  min-width: 0;
 }
 
 .queue-file {
+  flex: 1;
+  min-width: 0;
   font-size: 0.85rem;
   font-weight: 500;
   color: var(--text-primary);
@@ -1112,6 +1115,7 @@ body::before {
 }
 
 .queue-status {
+  flex-shrink: 0;
   text-transform: capitalize;
   font-size: 0.75rem;
   padding: 2px 8px;

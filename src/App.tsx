@@ -357,6 +357,29 @@ function App() {
     return index > 0 ? filename.slice(0, index) : filename;
   }
 
+  function truncateMiddle(text: string, maxLength: number): string {
+    if (text.length <= maxLength) return text;
+    if (maxLength <= 3) return text.slice(0, maxLength);
+    const charsToKeep = maxLength - 3;
+    const start = Math.ceil(charsToKeep / 2);
+    const end = Math.floor(charsToKeep / 2);
+    return `${text.slice(0, start)}...${text.slice(text.length - end)}`;
+  }
+
+  function truncateFilenameMiddle(filename: string, maxLength = 52): string {
+    if (filename.length <= maxLength) return filename;
+    const extIndex = filename.lastIndexOf(".");
+    const hasExtension = extIndex > 0 && extIndex < filename.length - 1;
+    if (!hasExtension) return truncateMiddle(filename, maxLength);
+
+    const extension = filename.slice(extIndex);
+    const stem = filename.slice(0, extIndex);
+    const maxStemLength = maxLength - extension.length;
+    if (maxStemLength <= 4) return truncateMiddle(filename, maxLength);
+
+    return `${truncateMiddle(stem, maxStemLength)}${extension}`;
+  }
+
   function extensionForPreset(presetId: string | null): string {
     return presets.find(p => p.id === presetId)?.extension || "mp4";
   }
@@ -1163,7 +1186,7 @@ function App() {
               >
                 <div className="queue-main">
                   <div className="queue-file" title={item.inputPath}>
-                    {getFilename(item.inputPath)}
+                    {truncateFilenameMiddle(getFilename(item.inputPath))}
                   </div>
                   <div className={`queue-status status-${item.status}`}>
                     {item.status}
