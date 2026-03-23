@@ -1065,6 +1065,24 @@ body::before {
   color: var(--text-muted);
 }
 
+.queue-bulk-controls {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.queue-bulk-controls label {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.queue-bulk-select {
+  min-width: 220px;
+  max-width: 320px;
+}
+
 .queue-table {
   display: grid;
   gap: 10px;
@@ -1265,6 +1283,20 @@ body::before {
 
   .queue-editors {
     grid-template-columns: 1fr;
+  }
+
+  .queue-bulk-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .queue-bulk-controls label {
+    white-space: normal;
+  }
+
+  .queue-bulk-select {
+    min-width: 0;
+    max-width: none;
   }
 
   .log-viewer {

@@ -217,6 +217,7 @@ function App() {
   const [ffmpegError, setFfmpegError] = useState<string | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
+  const [bulkQueuePresetId, setBulkQueuePresetId] = useState<string>("");
   
   const [inputPath, setInputPath] = useState<string | null>(null);
   const [mediaInfo, setMediaInfo] = useState<MediaInfo | null>(null);
@@ -336,6 +337,7 @@ function App() {
       setPresets(presetList);
       if (presetList.length > 0) {
         setSelectedPreset(presetList[0].id);
+        setBulkQueuePresetId(presetList[0].id);
       }
     } catch (e) {
       console.error("Failed to load presets:", e);
@@ -478,6 +480,7 @@ function App() {
   // Handle preset change
   async function handlePresetChange(presetId: string) {
     setSelectedPreset(presetId);
+    setBulkQueuePresetId(presetId);
     if (selectedQueueId) {
       setQueueItem(selectedQueueId, { presetId });
     }
@@ -674,6 +677,28 @@ function App() {
       error: undefined,
       outputPath: undefined,
     });
+  }
+
+  function applyPresetToAllQueued(presetId: string) {
+    if (!presetId || queue.length === 0) return;
+
+    setQueue(prev => prev.map(item => ({
+      ...item,
+      presetId,
+      status: "pending",
+      error: undefined,
+      outputPath: undefined,
+      progress: undefined,
+    })));
+
+    setSelectedPreset(presetId);
+
+    if (selectedQueueId) {
+      const selectedItem = queue.find(item => item.id === selectedQueueId);
+      if (selectedItem) {
+        setOutputPath(`${selectedItem.outputFolder}/${selectedItem.outputName}.${extensionForPreset(presetId)}`);
+      }
+    }
   }
 
   async function startBatchConversion() {
@@ -1177,119 +1202,160 @@ function App() {
         {queue.length === 0 ? (
           <p className="queue-empty">No files in queue yet. Add files above to start.</p>
         ) : (
-          <div className="queue-table">
-            {queue.map((item) => (
-              <div
-                key={item.id}
-                className={`queue-row ${selectedQueueId === item.id ? "selected" : ""} ${item.status}`}
-                onClick={() => selectQueueItem(item.id)}
+          <>
+            <div className="queue-bulk-controls">
+              <label htmlFor="queue-bulk-format">Output type for all queued files</label>
+              <select
+                id="queue-bulk-format"
+                value={bulkQueuePresetId}
+                onChange={(e) => setBulkQueuePresetId(e.target.value)}
+                disabled={isConverting}
+                className="queue-select queue-bulk-select"
               >
-                <div className="queue-main">
-                  <div className="queue-file" title={item.inputPath}>
-                    {truncateFilenameMiddle(getFilename(item.inputPath))}
+                {videoPresets.length > 0 && (
+                  <optgroup label="Video">
+                    {videoPresets.map((preset) => (
+                      <option key={preset.id} value={preset.id}>{preset.name}</option>
+                    ))}
+                  </optgroup>
+                )}
+                {audioPresets.length > 0 && (
+                  <optgroup label="Audio">
+                    {audioPresets.map((preset) => (
+                      <option key={preset.id} value={preset.id}>{preset.name}</option>
+                    ))}
+                  </optgroup>
+                )}
+                {imagePresets.length > 0 && (
+                  <optgroup label="Image">
+                    {imagePresets.map((preset) => (
+                      <option key={preset.id} value={preset.id}>{preset.name}</option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+              <button
+                className="btn-small"
+                onClick={() => applyPresetToAllQueued(bulkQueuePresetId)}
+                disabled={isConverting || !bulkQueuePresetId || queue.length === 0}
+              >
+                Apply to all queued files
+              </button>
+            </div>
+            <div className="queue-table">
+              {queue.map((item) => (
+                <div
+                  key={item.id}
+                  className={`queue-row ${selectedQueueId === item.id ? "selected" : ""} ${item.status}`}
+                  onClick={() => selectQueueItem(item.id)}
+                >
+                  <div className="queue-main">
+                    <div className="queue-file" title={item.inputPath}>
+                      {truncateFilenameMiddle(getFilename(item.inputPath))}
+                    </div>
+                    <div className={`queue-status status-${item.status}`}>
+                      {item.status}
+                    </div>
                   </div>
-                  <div className={`queue-status status-${item.status}`}>
-                    {item.status}
-                  </div>
-                </div>
-                <div className="queue-editors">
-                  <select
-                    value={item.presetId}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => {
-                      const newPresetId = e.target.value;
-                      setQueueItem(item.id, {
-                        presetId: newPresetId,
-                        status: "pending",
-                        error: undefined,
-                        outputPath: undefined,
-                      });
-                      if (selectedQueueId === item.id) {
-                        void handlePresetChange(newPresetId);
-                      }
-                    }}
-                    disabled={isConverting}
-                    className="queue-select"
-                  >
-                    {videoPresets.length > 0 && (
-                      <optgroup label="Video">
-                        {videoPresets.map((preset) => (
-                          <option key={preset.id} value={preset.id}>{preset.name}</option>
-                        ))}
-                      </optgroup>
-                    )}
-                    {audioPresets.length > 0 && (
-                      <optgroup label="Audio">
-                        {audioPresets.map((preset) => (
-                          <option key={preset.id} value={preset.id}>{preset.name}</option>
-                        ))}
-                      </optgroup>
-                    )}
-                    {imagePresets.length > 0 && (
-                      <optgroup label="Image">
-                        {imagePresets.map((preset) => (
-                          <option key={preset.id} value={preset.id}>{preset.name}</option>
-                        ))}
-                      </optgroup>
-                    )}
-                  </select>
-                  <input
-                    type="text"
-                    value={item.outputName}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => {
-                      const name = e.target.value;
-                      setQueueItem(item.id, {
-                        outputName: name,
-                        status: "pending",
-                        error: undefined,
-                        outputPath: undefined,
-                      });
-                      if (selectedQueueId === item.id) {
-                        setOutputPath(`${item.outputFolder}/${name}.${extensionForPreset(item.presetId)}`);
-                      }
-                    }}
-                    className="queue-input"
-                    disabled={isConverting}
-                  />
-                  <div className="queue-folder">
-                    <span title={item.outputFolder}>{item.outputFolder}</span>
+                  <div className="queue-editors">
+                    <select
+                      value={item.presetId}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => {
+                        const newPresetId = e.target.value;
+                        setQueueItem(item.id, {
+                          presetId: newPresetId,
+                          status: "pending",
+                          error: undefined,
+                          outputPath: undefined,
+                        });
+                        if (selectedQueueId === item.id) {
+                          void handlePresetChange(newPresetId);
+                        }
+                      }}
+                      disabled={isConverting}
+                      className="queue-select"
+                    >
+                      {videoPresets.length > 0 && (
+                        <optgroup label="Video">
+                          {videoPresets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>{preset.name}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {audioPresets.length > 0 && (
+                        <optgroup label="Audio">
+                          {audioPresets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>{preset.name}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {imagePresets.length > 0 && (
+                        <optgroup label="Image">
+                          {imagePresets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>{preset.name}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+                    <input
+                      type="text"
+                      value={item.outputName}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => {
+                        const name = e.target.value;
+                        setQueueItem(item.id, {
+                          outputName: name,
+                          status: "pending",
+                          error: undefined,
+                          outputPath: undefined,
+                        });
+                        if (selectedQueueId === item.id) {
+                          setOutputPath(`${item.outputFolder}/${name}.${extensionForPreset(item.presetId)}`);
+                        }
+                      }}
+                      className="queue-input"
+                      disabled={isConverting}
+                    />
+                    <div className="queue-folder">
+                      <span title={item.outputFolder}>{item.outputFolder}</span>
+                      <button
+                        className="btn-small"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void changeQueueItemFolder(item.id);
+                        }}
+                        disabled={isConverting}
+                      >
+                        Change
+                      </button>
+                    </div>
                     <button
-                      className="btn-small"
+                      className="btn-small queue-remove"
                       onClick={(e) => {
                         e.stopPropagation();
-                        void changeQueueItemFolder(item.id);
+                        removeQueueItem(item.id);
                       }}
                       disabled={isConverting}
                     >
-                      Change
+                      Remove
                     </button>
                   </div>
-                  <button
-                    className="btn-small queue-remove"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeQueueItem(item.id);
-                    }}
-                    disabled={isConverting}
-                  >
-                    Remove
-                  </button>
-                </div>
-                {item.status === "converting" && item.progress && (
-                  <div className="queue-progress">
-                    <div className="queue-progress-bar">
-                      <div className="queue-progress-fill" style={{ width: `${item.progress.percent}%` }} />
+                  {item.status === "converting" && item.progress && (
+                    <div className="queue-progress">
+                      <div className="queue-progress-bar">
+                        <div className="queue-progress-fill" style={{ width: `${item.progress.percent}%` }} />
+                      </div>
+                      <span>{item.progress.percent.toFixed(1)}%</span>
                     </div>
-                    <span>{item.progress.percent.toFixed(1)}%</span>
-                  </div>
-                )}
-                {item.status === "error" && item.error && (
-                  <div className="queue-error">{item.error}</div>
-                )}
-              </div>
-            ))}
-          </div>
+                  )}
+                  {item.status === "error" && item.error && (
+                    <div className="queue-error">{item.error}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
         )}
       </section>
 
